@@ -248,10 +248,17 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_data()
     
     if user_id_str not in user_data or not user_data[user_id_str].get('authenticated', False):
-        await update.message.reply_text(
-            "⚠️ You need to authenticate first.\n"
-            "Use the /key command to enter your key."
-        )
+        if update.callback_query:
+            await update.callback_query.message.edit_text(
+                "⚠️ You need to authenticate first.\n"
+                "Use the /key command to enter your key."
+            )
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(
+                "⚠️ You need to authenticate first.\n"
+                "Use the /key command to enter your key."
+            )
         return
     
     # Update last activity
@@ -287,6 +294,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "The video will be automatically deleted after 30 minutes."
     )
     
+    # Handle both callback queries and direct messages
     if update.callback_query:
         await update.callback_query.message.edit_text(
             message_text,
@@ -370,6 +378,7 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Show main menu again after a short delay
         await asyncio.sleep(1)
+        # Create a new callback query to return to menu
         await show_main_menu(update, context)
     
     except Exception as e:
@@ -572,16 +581,17 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Exit upload mode
         uploading_admins[user_id] = False
         
-        # Show admin panel again
-        await asyncio.sleep(1)
-        # Create a callback query to refresh admin panel
-        query = update.callback_query
-        if query:
-            await admin_panel(update, context)
-        else:
-            # If no callback query, send admin panel as message
-            await update.message.reply_text("Returning to admin panel...")
-            await handle_admin_commands(update, context)
+        # Show admin panel again with inline keyboard
+        keyboard = [
+            [InlineKeyboardButton("⚙️ Back to Admin Panel", callback_data='admin_panel')],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_menu')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "What would you like to do next?",
+            reply_markup=reply_markup
+        )
     
     except Exception as e:
         logger.error(f"Error uploading video: {e}")
@@ -653,13 +663,20 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to send broadcast to {user_id_str}: {e}")
             fail_count += 1
     
-    # Update status message
+    # Update status message with inline buttons
+    keyboard = [
+        [InlineKeyboardButton("⚙️ Admin Panel", callback_data='admin_panel')],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await status_msg.edit_text(
         f"✅ *Broadcast Complete!*\n\n"
         f"📤 Sent to: {success_count} users\n"
         f"❌ Failed: {fail_count} users\n"
         f"📊 Total: {len(authenticated_users)} users",
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        reply_markup=reply_markup
     )
     
     # Exit broadcast mode
@@ -866,7 +883,7 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text
     
     if text == '/admin':
-        # Send admin panel via message
+        # Send admin panel via message with inline buttons
         videos_count = len(get_video_files())
         users_count = len(user_data)
         authenticated_users = sum(1 for u in user_data.values() if u.get('authenticated', False))
@@ -877,7 +894,8 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("👥 Users", callback_data='admin_users')],
             [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
             [InlineKeyboardButton("🎬 Videos", callback_data='admin_videos')],
-            [InlineKeyboardButton("🔑 Keys", callback_data='admin_keys')]
+            [InlineKeyboardButton("🔑 Keys", callback_data='admin_keys')],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_menu')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -938,10 +956,10 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Return to main menu"""
     query = update.callback_query
+    
     # Create a new update object with the message
-    new_update = update
-    new_update.message = query.message
-    await show_main_menu(new_update, context)
+    # We need to pass the query to show_main_menu
+    await show_main_menu(update, context)
 
 async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
     """Background task to delete expired videos"""
