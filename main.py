@@ -17,13 +17,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot token - Replace with your actual bot token
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8296217662:AAHjIHXtxkjYmDR-9vSPzznUNWjQxvKGgdw"
 
 # The secret key for new users
 SECRET_KEY = "Amair"
 
 # Admin user IDs (Replace with actual admin Telegram user IDs)
-ADMIN_IDS = [123456789, 987654321]  # Add your Telegram user IDs here
+ADMIN_IDS = [8159360955, ]  # Add your Telegram user IDs here
 
 # Directory where videos are stored
 VIDEOS_DIR = "videos"
