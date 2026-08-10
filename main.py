@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8296217662:AAHjIHXtxkjYmDR-9vSPzznUNWjQxvKGgdw"
 
 # The secret key for new users
-SECRET_KEY = "Amair"
+SECRET_KEY = "Loveyouzara"
 
 # Admin user IDs (Replace with actual admin Telegram user IDs)
 ADMIN_IDS = [8159360955, ]  # Add your Telegram user IDs here
@@ -30,6 +30,7 @@ VIDEOS_DIR = "videos"
 
 # Data file for persistent storage
 DATA_FILE = "bot_data.json"
+ADMIN_FILE = "admin_ids.json"
 
 # Track user authentication status and video timers
 user_data = {}
@@ -66,17 +67,30 @@ def save_data():
         logger.error(f"Error saving data: {e}")
 
 def get_video_files():
-    """Get list of video files from the videos directory"""
+    """Get list of video files from the videos directory with IDs"""
     video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp', '.m4v', '.mpg', '.mpeg'}
     videos = []
     
     if os.path.exists(VIDEOS_DIR):
-        for file in os.listdir(VIDEOS_DIR):
+        for idx, file in enumerate(os.listdir(VIDEOS_DIR), 1):
             file_path = os.path.join(VIDEOS_DIR, file)
             if os.path.isfile(file_path) and Path(file).suffix.lower() in video_extensions:
-                videos.append(file_path)
+                videos.append({
+                    'id': idx,
+                    'name': file,
+                    'path': file_path,
+                    'size': get_file_size(file_path)
+                })
     
-    return sorted(videos)
+    return videos
+
+def get_video_by_id(video_id):
+    """Get video by its ID"""
+    videos = get_video_files()
+    for video in videos:
+        if video['id'] == video_id:
+            return video
+    return None
 
 def is_admin(user_id):
     """Check if a user is an admin"""
@@ -84,12 +98,15 @@ def is_admin(user_id):
 
 def get_file_size(file_path):
     """Get file size in human readable format"""
-    size = os.path.getsize(file_path)
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} TB"
+    try:
+        size = os.path.getsize(file_path)
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+    except:
+        return "Unknown"
 
 def get_file_size_from_bytes(size):
     """Convert bytes to human readable format"""
@@ -98,6 +115,33 @@ def get_file_size_from_bytes(size):
             return f"{size:.1f} {unit}"
         size /= 1024.0
     return f"{size:.1f} TB"
+
+def save_admin_ids():
+    """Save admin IDs to a file"""
+    try:
+        with open(ADMIN_FILE, 'w') as f:
+            json.dump({'admins': ADMIN_IDS}, f, indent=2)
+        logger.info(f"Admin IDs saved: {ADMIN_IDS}")
+    except Exception as e:
+        logger.error(f"Error saving admin IDs: {e}")
+
+def load_admin_ids():
+    """Load admin IDs from file"""
+    global ADMIN_IDS
+    try:
+        if os.path.exists(ADMIN_FILE):
+            with open(ADMIN_FILE, 'r') as f:
+                data = json.load(f)
+                ADMIN_IDS = data.get('admins', ADMIN_IDS)
+                logger.info(f"Loaded {len(ADMIN_IDS)} admin IDs")
+        else:
+            # Create file with default admins
+            save_admin_ids()
+    except Exception as e:
+        logger.error(f"Error loading admin IDs: {e}")
+
+# Load admin IDs at startup
+load_admin_ids()
 
 # ==================== USER COMMANDS ====================
 
@@ -277,7 +321,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    videos_count = len(get_video_files())
+    videos = get_video_files()
+    videos_count = len(videos)
     
     # Admin greeting
     if is_admin(user_id):
@@ -309,125 +354,201 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a random video to the user"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    user_id_str = str(user_id)
-    
-    # Check authentication (admin auto-auth)
-    if is_admin(user_id):
-        if user_id_str not in user_data:
-            user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
-            save_data()
-        elif not user_data[user_id_str].get('authenticated', False):
-            user_data[user_id_str]['authenticated'] = True
-            user_data[user_id_str]['is_admin'] = True
-            save_data()
-    
-    if user_id_str not in user_data or not user_data[user_id_str].get('authenticated', False):
-        await query.answer("⚠️ Please authenticate first using /key")
-        return
-    
-    # Get list of videos
-    videos = get_video_files()
-    
-    if not videos:
-        await query.answer("❌ No videos available in the folder!")
-        return
-    
-    # Select a random video
-    selected_video = random.choice(videos)
-    video_name = os.path.basename(selected_video)
-    video_size = get_file_size(selected_video)
-    
-    try:
-        # Send "loading" message
-        await query.answer("📤 Sending video...")
-        
-        # Send the video
-        with open(selected_video, 'rb') as video_file:
-            message = await query.message.reply_video(
-                video=video_file,
-                caption=f"🎬 Here's your random video!\n\n"
-                       f"⏰ It will be deleted in 30 minutes.\n"
-                       f"📹 Video: {video_name}\n"
-                       f"📦 Size: {video_size}",
-                supports_streaming=True
-            )
-        
-        # Update user stats
-        user_data[user_id_str]['videos_watched'] = user_data[user_id_str].get('videos_watched', 0) + 1
-        user_data[user_id_str]['last_video_time'] = datetime.now().isoformat()
-        save_data()
-        
-        # Schedule video deletion after 30 minutes
-        chat_id = query.message.chat_id
-        message_id = message.message_id
-        
-        # Store for deletion
-        pending_deletions.append({
-            'chat_id': chat_id,
-            'message_id': message_id,
-            'delete_time': datetime.now() + timedelta(minutes=30),
-            'user_id': user_id,
-            'video_name': video_name
-        })
-        
-        await query.answer("✅ Video sent successfully!")
-        
-        # Show main menu again after a short delay
-        await asyncio.sleep(1)
-        # Create a new callback query to return to menu
-        await show_main_menu(update, context)
-    
-    except Exception as e:
-        logger.error(f"Error sending video: {e}")
-        await query.answer("❌ Error sending video. Please try again.")
-
-async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user statistics"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    user_id_str = str(user_id)
-    
-    # Admin auto-auth check
-    if is_admin(user_id) and user_id_str not in user_data:
-        user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
-        save_data()
-    
-    if user_id_str not in user_data:
-        await query.answer("No data found!")
-        return
-    
-    stats = user_data[user_id_str]
-    videos_watched = stats.get('videos_watched', 0)
-    joined_at = stats.get('joined_at', 'Unknown')
-    is_admin_user = stats.get('is_admin', False)
-    
-    # Format join date
-    try:
-        join_date = datetime.fromisoformat(joined_at).strftime('%Y-%m-%d %H:%M')
-    except:
-        join_date = 'Unknown'
-    
-    message = (
-        "📊 *Your Statistics*\n\n"
-        f"👤 Name: {query.from_user.first_name}\n"
-        f"🆔 ID: `{user_id}`\n"
-        f"📅 Joined: {join_date}\n"
-        f"🎬 Videos Watched: {videos_watched}\n"
-        f"✅ Status: {'Active' if stats.get('authenticated', False) else 'Inactive'}\n"
-        f"👑 Role: {'Admin' if is_admin_user else 'User'}"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.message.edit_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-    await query.answer()
-
 # ==================== ADMIN COMMANDS ====================
+
+async def give_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Give admin access to a user"""
+    user_id = update.effective_user.id
+    
+    # Check if the command user is admin
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    # Check if user ID is provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide a user ID.\n"
+            "Usage: `/giveadmin USER_ID`\n\n"
+            "Example: `/giveadmin 123456789`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        new_admin_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid user ID. Please provide a valid numeric ID.\n"
+            "Usage: `/giveadmin USER_ID`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Check if user is already an admin
+    if new_admin_id in ADMIN_IDS:
+        await update.message.reply_text(
+            f"ℹ️ User `{new_admin_id}` is already an admin.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Add to admin list
+    ADMIN_IDS.append(new_admin_id)
+    save_admin_ids()  # Save to file
+    
+    # Update user data
+    user_id_str = str(new_admin_id)
+    if user_id_str not in user_data:
+        user_data[user_id_str] = {
+            'authenticated': True,
+            'is_admin': True,
+            'joined_at': datetime.now().isoformat(),
+            'videos_watched': 0,
+            'last_activity': datetime.now().isoformat()
+        }
+    else:
+        user_data[user_id_str]['authenticated'] = True
+        user_data[user_id_str]['is_admin'] = True
+    save_data()
+    
+    # Notify the new admin
+    try:
+        await context.bot.send_message(
+            new_admin_id,
+            "👑 *Congratulations!*\n\n"
+            "You have been granted admin access to the Video Bot!\n"
+            "You now have full access to all admin features.\n"
+            "Use /admin to access the admin panel.",
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+    
+    # Confirm to the admin who gave the command
+    await update.message.reply_text(
+        f"✅ *Admin Added Successfully!*\n\n"
+        f"User ID: `{new_admin_id}`\n"
+        f"Total admins now: {len(ADMIN_IDS)}\n\n"
+        f"The user has been notified.",
+        parse_mode='Markdown'
+    )
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove admin access from a user"""
+    user_id = update.effective_user.id
+    
+    # Check if the command user is admin
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    # Check if user ID is provided
+    if not context.args:
+        # Show list of admins
+        if len(ADMIN_IDS) <= 1:
+            await update.message.reply_text(
+                "⚠️ You are the only admin. You cannot remove yourself if you're the last admin.\n\n"
+                "Usage: `/rmadmin USER_ID`\n"
+                "Example: `/rmadmin 123456789`"
+            )
+            return
+        
+        message = "👑 *Current Admins:*\n\n"
+        for idx, admin_id in enumerate(ADMIN_IDS, 1):
+            # Try to get user info
+            try:
+                user_info = await context.bot.get_chat(admin_id)
+                name = user_info.first_name or "Unknown"
+                username = f"(@{user_info.username})" if user_info.username else ""
+                message += f"{idx}. `{admin_id}` - {name} {username}\n"
+            except:
+                message += f"{idx}. `{admin_id}`\n"
+        
+        message += "\n\nUsage: `/rmadmin USER_ID`\n"
+        message += "Example: `/rmadmin 123456789`"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+    
+    try:
+        remove_admin_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid user ID. Please provide a valid numeric ID.\n"
+            "Usage: `/rmadmin USER_ID`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Check if user is an admin
+    if remove_admin_id not in ADMIN_IDS:
+        await update.message.reply_text(
+            f"❌ User `{remove_admin_id}` is not an admin.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Check if trying to remove self
+    if remove_admin_id == user_id:
+        if len(ADMIN_IDS) <= 1:
+            await update.message.reply_text(
+                "⚠️ You cannot remove yourself as you're the only admin.\n"
+                "Please add another admin first using /giveadmin",
+                parse_mode='Markdown'
+            )
+            return
+        else:
+            # Ask for confirmation
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes, Remove Me", callback_data=f'confirm_remove_self_{remove_admin_id}'),
+                    InlineKeyboardButton("❌ No, Cancel", callback_data='cancel_remove_admin')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"⚠️ *Warning!*\n\n"
+                f"You are about to remove YOURSELF as an admin.\n"
+                f"This action cannot be undone easily.\n\n"
+                f"Are you sure you want to proceed?",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            return
+    
+    # Remove from admin list
+    ADMIN_IDS.remove(remove_admin_id)
+    save_admin_ids()  # Save to file
+    
+    # Update user data
+    user_id_str = str(remove_admin_id)
+    if user_id_str in user_data:
+        user_data[user_id_str]['is_admin'] = False
+        save_data()
+    
+    # Notify the removed admin
+    try:
+        await context.bot.send_message(
+            remove_admin_id,
+            "⚠️ *Admin Access Removed*\n\n"
+            "Your admin access to the Video Bot has been revoked.\n"
+            "You will still have regular user access.\n\n"
+            "If you think this is a mistake, contact another admin.",
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+    
+    # Confirm to the admin who removed
+    await update.message.reply_text(
+        f"✅ *Admin Removed Successfully!*\n\n"
+        f"User ID: `{remove_admin_id}`\n"
+        f"Remaining admins: {len(ADMIN_IDS)}\n\n"
+        f"The user has been notified.",
+        parse_mode='Markdown'
+    )
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin panel"""
@@ -438,7 +559,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔ Unauthorized access!")
         return
     
-    videos_count = len(get_video_files())
+    videos = get_video_files()
+    videos_count = len(videos)
     users_count = len(user_data)
     authenticated_users = sum(1 for u in user_data.values() if u.get('authenticated', False))
     
@@ -459,6 +581,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
         [InlineKeyboardButton("🎬 Manage Videos", callback_data='admin_videos')],
         [InlineKeyboardButton("🔑 Manage Keys", callback_data='admin_keys')],
+        [InlineKeyboardButton("👑 Manage Admins", callback_data='admin_manage_admins')],
         [InlineKeyboardButton("🔄 Refresh", callback_data='admin_refresh')],
         [InlineKeyboardButton("🔙 Back to Main", callback_data='back_to_menu')]
     ]
@@ -468,6 +591,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *Admin Panel*\n\n"
         f"📊 Total Users: {users_count}\n"
         f"✅ Active Users: {authenticated_users}\n"
+        f"👑 Admins: {len(ADMIN_IDS)}\n"
         f"📁 Videos Available: {videos_count}\n"
         f"💾 Storage Used: {folder_size_str}\n"
         f"⏳ Pending Deletions: {len(pending_deletions)}\n\n"
@@ -476,6 +600,70 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.message.edit_text(message, parse_mode='Markdown', reply_markup=reply_markup)
     await query.answer()
+
+async def admin_manage_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin management options"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if not is_admin(user_id):
+        await query.answer("⛔ Unauthorized!")
+        return
+    
+    message = "👑 *Manage Admins*\n\n"
+    message += f"Total Admins: {len(ADMIN_IDS)}\n\n"
+    message += "📋 *Current Admins:*\n"
+    
+    for idx, admin_id in enumerate(ADMIN_IDS, 1):
+        try:
+            user_info = await context.bot.get_chat(admin_id)
+            name = user_info.first_name or "Unknown"
+            username = f"(@{user_info.username})" if user_info.username else ""
+            is_self = " (You)" if admin_id == user_id else ""
+            message += f"{idx}. `{admin_id}` - {name} {username}{is_self}\n"
+        except:
+            message += f"{idx}. `{admin_id}`\n"
+    
+    message += "\n📌 *Commands:*\n"
+    message += "• `/giveadmin USER_ID` - Add new admin\n"
+    message += "• `/rmadmin USER_ID` - Remove admin\n"
+    message += "• `/listadmins` - Show all admins"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    await query.answer()
+
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all admins"""
+    user_id = update.effective_user.id
+    
+    # Check if the command user is admin
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    if not ADMIN_IDS:
+        await update.message.reply_text("❌ No admins found.")
+        return
+    
+    message = "👑 *Admin List*\n\n"
+    for idx, admin_id in enumerate(ADMIN_IDS, 1):
+        try:
+            user_info = await context.bot.get_chat(admin_id)
+            name = user_info.first_name or "Unknown"
+            username = f"(@{user_info.username})" if user_info.username else ""
+            is_self = " (You)" if admin_id == user_id else ""
+            message += f"{idx}. `{admin_id}` - {name} {username}{is_self}\n"
+        except:
+            message += f"{idx}. `{admin_id}`\n"
+    
+    message += f"\nTotal: {len(ADMIN_IDS)} admins"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start video upload process"""
@@ -553,13 +741,22 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         file_size = get_file_size(file_path)
         
+        # Get the new video ID
+        videos = get_video_files()
+        new_video = None
+        for v in videos:
+            if v['path'] == file_path:
+                new_video = v
+                break
+        
         # Success message
         await update.message.reply_text(
             f"✅ *Video Uploaded Successfully!*\n\n"
             f"📹 Name: {file_name}\n"
+            f"🆔 ID: {new_video['id'] if new_video else 'N/A'}\n"
             f"📦 Size: {file_size}\n"
             f"📁 Location: `{file_path}`\n\n"
-            f"Total videos: {len(get_video_files())}",
+            f"Total videos: {len(videos)}",
             parse_mode='Markdown'
         )
         
@@ -572,6 +769,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                         f"📹 *New Video Uploaded*\n\n"
                         f"Uploaded by: {update.effective_user.first_name}\n"
                         f"File: {file_name}\n"
+                        f"ID: {new_video['id'] if new_video else 'N/A'}\n"
                         f"Size: {file_size}",
                         parse_mode='Markdown'
                     )
@@ -694,7 +892,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users_list = []
     for uid, data in user_data.items():
         if data.get('authenticated', False):
-            is_admin_user = data.get('is_admin', False)
+            is_admin_user = data.get('is_admin', False) or int(uid) in ADMIN_IDS
             role = "👑" if is_admin_user else "👤"
             videos = data.get('videos_watched', 0)
             users_list.append(f"{role} ID: `{uid}` - {videos} videos")
@@ -729,7 +927,6 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users_count = len(user_data)
     authenticated_users = sum(1 for u in user_data.values() if u.get('authenticated', False))
     total_videos_watched = sum(u.get('videos_watched', 0) for u in user_data.values())
-    admin_count = sum(1 for u in user_data.values() if u.get('is_admin', False))
     
     # Calculate active users (last 7 days)
     week_ago = datetime.now() - timedelta(days=7)
@@ -748,14 +945,17 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get video folder size
     folder_size = 0
     for video in videos:
-        folder_size += os.path.getsize(video)
+        try:
+            folder_size += os.path.getsize(video['path'])
+        except:
+            pass
     folder_size_str = get_file_size_from_bytes(folder_size)
     
     message = (
         "📊 *Bot Statistics*\n\n"
         f"👥 Total Users: {users_count}\n"
         f"✅ Authenticated: {authenticated_users}\n"
-        f"👑 Admins: {admin_count}\n"
+        f"👑 Admins: {len(ADMIN_IDS)}\n"
         f"🟢 Active (7 days): {active_users}\n"
         f"🎬 Videos Watched: {total_videos_watched}\n"
         f"📁 Videos Available: {videos_count}\n"
@@ -787,22 +987,21 @@ async def admin_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = "🎬 *Video Management*\n\n"
     if videos:
         message += f"📁 Total videos: {len(videos)}\n\n"
-        message += "📹 *Video List:*\n"
+        message += "📹 *Video List with IDs:*\n"
         
-        # Show video details with file size
-        for i, video in enumerate(videos[:20], 1):
-            video_name = os.path.basename(video)
-            video_size = get_file_size(video)
-            message += f"{i}. {video_name} ({video_size})\n"
+        # Show video details with ID and file size
+        for video in videos[:20]:
+            message += f"`{video['id']:3d}`. {video['name']} ({video['size']})\n"
         
         if len(videos) > 20:
-            message += f"\n... and {len(videos) - 20} more videos"
+            message += f"\n... and {len(videos) - 20} more videos\n"
         
-        message += "\n\nℹ️ To delete a video, manually remove it from the 'videos' folder."
+        message += "\n💡 To delete a video, use:\n"
+        message += "`/rmvideo VIDEO_ID`\n"
+        message += "Example: `/rmvideo 5`\n\n"
+        message += "📤 To add videos, use the 'Upload Video' button below."
     else:
         message += "❌ No videos found in the folder."
-    
-    message += "\n\n📤 To add videos, use the 'Upload Video' button in Admin Panel."
     
     keyboard = [
         [InlineKeyboardButton("📤 Upload Video", callback_data='admin_upload')],
@@ -835,7 +1034,7 @@ async def admin_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *User Stats:*\n"
         f"• Total users: {len(user_data)}\n"
         f"• Authenticated: {sum(1 for u in user_data.values() if u.get('authenticated', False))}\n"
-        f"• Admins: {sum(1 for u in user_data.values() if u.get('is_admin', False))}\n\n"
+        f"• Admins: {len(ADMIN_IDS)}\n\n"
         f"💡 *Generated Key:* `{new_key}` (for demo only)\n\n"
         "📌 *Admins:* You don't need a key - you have automatic access!"
     )
@@ -884,7 +1083,8 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
     
     if text == '/admin':
         # Send admin panel via message with inline buttons
-        videos_count = len(get_video_files())
+        videos = get_video_files()
+        videos_count = len(videos)
         users_count = len(user_data)
         authenticated_users = sum(1 for u in user_data.values() if u.get('authenticated', False))
         
@@ -895,6 +1095,7 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
             [InlineKeyboardButton("🎬 Videos", callback_data='admin_videos')],
             [InlineKeyboardButton("🔑 Keys", callback_data='admin_keys')],
+            [InlineKeyboardButton("👑 Manage Admins", callback_data='admin_manage_admins')],
             [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_menu')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -903,6 +1104,7 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
             "⚙️ *Admin Panel*\n\n"
             f"📊 Total Users: {users_count}\n"
             f"✅ Active Users: {authenticated_users}\n"
+            f"👑 Admins: {len(ADMIN_IDS)}\n"
             f"📁 Videos: {videos_count}"
         )
         
@@ -924,10 +1126,17 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Broadcast messages to all users\n"
             "• View user statistics\n"
             "• Manage videos\n"
-            "• View all users\n\n"
-            "📌 *Commands:*\n"
+            "• View all users\n"
+            "• Give/Remove admin access\n"
+            "• Delete videos by ID\n\n"
+            "📌 *Admin Commands:*\n"
             "/start - Start the bot\n"
             "/admin - Admin panel\n"
+            "/giveadmin USER_ID - Give admin access\n"
+            "/rmadmin USER_ID - Remove admin access\n"
+            "/listadmins - List all admins\n"
+            "/rmvideo VIDEO_ID - Delete a video\n"
+            "/listvideos - List all videos with IDs\n"
             "/cancel - Cancel current operation\n\n"
             "💡 You have automatic access - no key needed!"
         )
@@ -992,6 +1201,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_key(update, context)
     elif text and text.startswith('/admin'):
         await handle_admin_commands(update, context)
+    elif text and text.startswith('/giveadmin'):
+        await give_admin(update, context)
+    elif text and text.startswith('/rmadmin'):
+        await remove_admin(update, context)
+    elif text and text.startswith('/listadmins'):
+        await list_admins(update, context)
+    elif text and text.startswith('/rmvideo'):
+        await remove_video(update, context)
+    elif text and text.startswith('/listvideos'):
+        await list_videos(update, context)
     elif text and text.startswith('/cancel'):
         if context.user_data.get('broadcast_mode', False):
             context.user_data['broadcast_mode'] = False
@@ -1014,12 +1233,138 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use /start to begin or /key to enter your key."
         )
 
+async def remove_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a video by its ID"""
+    user_id = update.effective_user.id
+    
+    # Check if the command user is admin
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    # Check if video ID is provided
+    if not context.args:
+        # Show list of videos with IDs
+        videos = get_video_files()
+        if not videos:
+            await update.message.reply_text("❌ No videos found in the folder.")
+            return
+        
+        message = "📹 *Available Videos with IDs:*\n\n"
+        for video in videos[:20]:
+            message += f"`{video['id']}`. {video['name']} ({video['size']})\n"
+        
+        if len(videos) > 20:
+            message += f"\n... and {len(videos) - 20} more videos"
+        
+        message += "\n\nUsage: `/rmvideo VIDEO_ID`\n"
+        message += "Example: `/rmvideo 5`\n\n"
+        message += "💡 To see all videos, use `/listvideos`"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+    
+    try:
+        video_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid video ID. Please provide a valid numeric ID.\n"
+            "Usage: `/rmvideo VIDEO_ID`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Find the video
+    video = get_video_by_id(video_id)
+    if not video:
+        await update.message.reply_text(
+            f"❌ Video with ID `{video_id}` not found.\n"
+            "Use `/listvideos` to see all available videos.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Delete the video file
+    try:
+        os.remove(video['path'])
+        
+        # Log the deletion
+        logger.info(f"Video '{video['name']}' (ID: {video_id}) deleted by admin {user_id}")
+        
+        await update.message.reply_text(
+            f"✅ *Video Deleted Successfully!*\n\n"
+            f"📹 Name: {video['name']}\n"
+            f"🆔 ID: {video_id}\n"
+            f"📦 Size: {video['size']}\n\n"
+            f"Remaining videos: {len(get_video_files())}",
+            parse_mode='Markdown'
+        )
+        
+        # Notify other admins
+        for admin_id in ADMIN_IDS:
+            if admin_id != user_id:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"🗑️ *Video Deleted*\n\n"
+                        f"Deleted by: {update.effective_user.first_name}\n"
+                        f"Video: {video['name']}\n"
+                        f"ID: {video_id}",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                
+    except Exception as e:
+        logger.error(f"Error deleting video: {e}")
+        await update.message.reply_text(
+            f"❌ Error deleting video: {str(e)}"
+        )
+
+async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all videos with their IDs"""
+    user_id = update.effective_user.id
+    
+    # Check if the command user is admin
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+    
+    videos = get_video_files()
+    
+    if not videos:
+        await update.message.reply_text("❌ No videos found in the folder.")
+        return
+    
+    message = "📹 *Complete Video List:*\n\n"
+    
+    # Show all videos with IDs
+    for video in videos:
+        message += f"`{video['id']:3d}`. {video['name']} ({video['size']})\n"
+        
+        # Split into multiple messages if too long
+        if len(message) > 4000:
+            await update.message.reply_text(message, parse_mode='Markdown')
+            message = ""
+    
+    if message:
+        await update.message.reply_text(message, parse_mode='Markdown')
+    
+    # Show usage info
+    await update.message.reply_text(
+        "💡 To delete a video, use:\n"
+        "`/rmvideo VIDEO_ID`\n\n"
+        "Example: `/rmvideo 5`",
+        parse_mode='Markdown'
+    )
+
 # ==================== MAIN FUNCTION ====================
 
 def main():
     """Start the bot"""
     # Load data
     load_data()
+    load_admin_ids()
     
     # Create application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1028,6 +1373,11 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("key", handle_key))
     application.add_handler(CommandHandler("admin", handle_admin_commands))
+    application.add_handler(CommandHandler("giveadmin", give_admin))
+    application.add_handler(CommandHandler("rmadmin", remove_admin))
+    application.add_handler(CommandHandler("listadmins", list_admins))
+    application.add_handler(CommandHandler("rmvideo", remove_video))
+    application.add_handler(CommandHandler("listvideos", list_videos))
     application.add_handler(CommandHandler("cancel", handle_message))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -1079,10 +1429,175 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_videos(update, context)
     elif query.data == 'admin_keys':
         await admin_keys(update, context)
+    elif query.data == 'admin_manage_admins':
+        await admin_manage_admins(update, context)
     elif query.data == 'admin_refresh':
         await admin_refresh(update, context)
+    elif query.data.startswith('confirm_remove_self_'):
+        # Handle self-removal confirmation
+        admin_id = int(query.data.replace('confirm_remove_self_', ''))
+        await confirm_remove_self(update, context, admin_id)
+    elif query.data == 'cancel_remove_admin':
+        await query.message.edit_text("✅ Admin removal cancelled.")
+        await admin_panel(update, context)
     else:
         await query.message.reply_text("Unknown action!")
+
+async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_id):
+    """Confirm self-removal of admin"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Verify it's the same user
+    if user_id != admin_id:
+        await query.answer("⛔ You can only remove yourself!")
+        return
+    
+    # Check if trying to remove self
+    if len(ADMIN_IDS) <= 1:
+        await query.answer("⚠️ Cannot remove yourself as you're the only admin!")
+        return
+    
+    # Remove from admin list
+    ADMIN_IDS.remove(admin_id)
+    save_admin_ids()
+    
+    # Update user data
+    user_id_str = str(admin_id)
+    if user_id_str in user_data:
+        user_data[user_id_str]['is_admin'] = False
+        save_data()
+    
+    await query.message.edit_text(
+        "✅ *You have been removed as an admin.*\n\n"
+        "You will now have regular user access.\n"
+        "If you need admin access again, contact another admin.",
+        parse_mode='Markdown'
+    )
+    
+    # Show main menu
+    await show_main_menu(update, context)
+
+async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a random video to the user"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    user_id_str = str(user_id)
+    
+    # Check authentication (admin auto-auth)
+    if is_admin(user_id):
+        if user_id_str not in user_data:
+            user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
+            save_data()
+        elif not user_data[user_id_str].get('authenticated', False):
+            user_data[user_id_str]['authenticated'] = True
+            user_data[user_id_str]['is_admin'] = True
+            save_data()
+    
+    if user_id_str not in user_data or not user_data[user_id_str].get('authenticated', False):
+        await query.answer("⚠️ Please authenticate first using /key")
+        return
+    
+    # Get list of videos
+    videos = get_video_files()
+    
+    if not videos:
+        await query.answer("❌ No videos available in the folder!")
+        return
+    
+    # Select a random video
+    selected_video = random.choice(videos)
+    video_name = selected_video['name']
+    video_size = selected_video['size']
+    video_id = selected_video['id']
+    
+    try:
+        # Send "loading" message
+        await query.answer("📤 Sending video...")
+        
+        # Send the video
+        with open(selected_video['path'], 'rb') as video_file:
+            message = await query.message.reply_video(
+                video=video_file,
+                caption=f"🎬 Here's your random video!\n\n"
+                       f"⏰ It will be deleted in 30 minutes.\n"
+                       f"📹 Video: {video_name}\n"
+                       f"🆔 ID: {video_id}\n"
+                       f"📦 Size: {video_size}",
+                supports_streaming=True
+            )
+        
+        # Update user stats
+        user_data[user_id_str]['videos_watched'] = user_data[user_id_str].get('videos_watched', 0) + 1
+        user_data[user_id_str]['last_video_time'] = datetime.now().isoformat()
+        save_data()
+        
+        # Schedule video deletion after 30 minutes
+        chat_id = query.message.chat_id
+        message_id = message.message_id
+        
+        # Store for deletion
+        pending_deletions.append({
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'delete_time': datetime.now() + timedelta(minutes=30),
+            'user_id': user_id,
+            'video_name': video_name,
+            'video_id': video_id
+        })
+        
+        await query.answer("✅ Video sent successfully!")
+        
+        # Show main menu again after a short delay
+        await asyncio.sleep(1)
+        # Create a new callback query to return to menu
+        await show_main_menu(update, context)
+    
+    except Exception as e:
+        logger.error(f"Error sending video: {e}")
+        await query.answer("❌ Error sending video. Please try again.")
+
+async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user statistics"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    user_id_str = str(user_id)
+    
+    # Admin auto-auth check
+    if is_admin(user_id) and user_id_str not in user_data:
+        user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
+        save_data()
+    
+    if user_id_str not in user_data:
+        await query.answer("No data found!")
+        return
+    
+    stats = user_data[user_id_str]
+    videos_watched = stats.get('videos_watched', 0)
+    joined_at = stats.get('joined_at', 'Unknown')
+    is_admin_user = stats.get('is_admin', False) or is_admin(user_id)
+    
+    # Format join date
+    try:
+        join_date = datetime.fromisoformat(joined_at).strftime('%Y-%m-%d %H:%M')
+    except:
+        join_date = 'Unknown'
+    
+    message = (
+        "📊 *Your Statistics*\n\n"
+        f"👤 Name: {query.from_user.first_name}\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"📅 Joined: {join_date}\n"
+        f"🎬 Videos Watched: {videos_watched}\n"
+        f"✅ Status: {'Active' if stats.get('authenticated', False) else 'Inactive'}\n"
+        f"👑 Role: {'Admin' if is_admin_user else 'User'}"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.edit_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    await query.answer()
 
 if __name__ == '__main__':
     main()
