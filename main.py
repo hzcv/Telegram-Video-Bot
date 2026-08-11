@@ -789,7 +789,7 @@ async def admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "You can send multiple videos one by one.\n"
         "Supported formats: MP4, AVI, MOV, MKV, WEBM, etc.\n\n"
         "⚠️ *Important:*\n"
-        "• Maximum file size: 50MB per video (Telegram limit)\n"
+        "• No file size limit (Telegram allows up to 2GB)\n"
         "• Videos will be saved to the 'videos' folder\n"
         "• Each video will get a permanent ID\n"
         "• Send one video at a time\n"
@@ -829,15 +829,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Clean filename
         file_name = file_name.replace('/', '_').replace('\\', '_')
         
-        # Check file size (Telegram limit is 50MB)
-        if video.file_size > 50 * 1024 * 1024:
-            await update.message.reply_text(
-                f"❌ Video '{file_name}' is too large ({get_file_size_from_bytes(video.file_size)}).\n"
-                "Maximum size is 50MB. Please compress the video and try again."
-            )
-            return
-        
-        # Get file
+        # Get file (no size check - Telegram handles it)
         file = await context.bot.get_file(file_id)
         file_path = os.path.join(VIDEOS_DIR, file_name)
         
@@ -1334,9 +1326,6 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Return to main menu"""
     query = update.callback_query
-    
-    # Create a new update object with the message
-    # We need to pass the query to show_main_menu
     await show_main_menu(update, context)
 
 async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
@@ -1569,6 +1558,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'get_video':
         await send_video(update, context)
+    elif query.data == 'next_video':
+        # Send another video without returning to menu
+        await send_video(update, context)
     elif query.data == 'my_stats':
         await show_user_stats(update, context)
     elif query.data == 'help_user' or query.data == 'help_key':
@@ -1708,10 +1700,18 @@ async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE
     await show_main_menu(update, context)
 
 async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a random video to the user"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    user_id_str = str(user_id)
+    """Send a random video to the user with Next Video button"""
+    # Determine if it's a callback query or direct message
+    if update.callback_query:
+        query = update.callback_query
+        user_id = query.from_user.id
+        chat_id = query.message.chat_id
+        user_id_str = str(user_id)
+        is_callback = True
+        message_obj = query.message
+    else:
+        # Not used directly from command, but for completeness
+        return
     
     # Check authentication (admin auto-auth)
     if is_admin(user_id):
@@ -1742,18 +1742,29 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Send "loading" message
-        await query.answer("📤 Sending video...")
+        if is_callback:
+            await query.answer("📤 Sending video...")
         
-        # Send the video
+        # Send the video with inline buttons: Next Video and Main Menu
+        keyboard = [
+            [
+                InlineKeyboardButton("🎬 Next Video", callback_data='next_video'),
+                InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_menu')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         with open(selected_video['path'], 'rb') as video_file:
-            message = await query.message.reply_video(
+            sent_message = await message_obj.reply_video(
                 video=video_file,
                 caption=f"🎬 Here's your random video!\n\n"
                        f"⏰ This message will be deleted in 30 minutes.\n"
                        f"📹 Video: {video_name}\n"
                        f"🆔 ID: {video_id} (permanent)\n"
                        f"📦 Size: {video_size}\n\n"
-                       f"💡 The video file is stored permanently in the bot's library.",
+                       f"💡 The video file is stored permanently.\n"
+                       f"Click 'Next Video' for another random video.",
+                reply_markup=reply_markup,
                 supports_streaming=True
             )
         
@@ -1763,29 +1774,23 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data()
         
         # Schedule ONLY the message deletion from chat after 30 minutes
-        chat_id = query.message.chat_id
-        message_id = message.message_id
-        
-        # Store for deletion (only message, not video file)
         pending_deletions.append({
             'chat_id': chat_id,
-            'message_id': message_id,
+            'message_id': sent_message.message_id,
             'delete_time': datetime.now() + timedelta(minutes=30),
             'user_id': user_id,
             'video_name': video_name,
             'video_id': video_id
         })
         
-        await query.answer("✅ Video sent successfully!")
-        
-        # Show main menu again after a short delay
-        await asyncio.sleep(1)
-        # Create a new callback query to return to menu
-        await show_main_menu(update, context)
+        if is_callback:
+            await query.answer("✅ Video sent!")
+            # Do not show main menu automatically; user can click buttons
     
     except Exception as e:
         logger.error(f"Error sending video: {e}")
-        await query.answer("❌ Error sending video. Please try again.")
+        if is_callback:
+            await query.answer("❌ Error sending video. Please try again.")
 
 async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user statistics"""
