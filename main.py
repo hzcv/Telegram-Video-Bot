@@ -112,7 +112,9 @@ def rebuild_video_database():
                     'size': get_file_size(file_path),
                     'size_bytes': os.path.getsize(file_path),
                     'hash': file_hash,
-                    'upload_date': datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
+                    'upload_date': datetime.fromtimestamp(os.path.getctime(file_path)).isoformat(),
+                    'file_id': None,  # No file_id for old videos
+                    'file_unique_id': None
                 }
     
     # Merge with existing database
@@ -125,6 +127,7 @@ def rebuild_video_database():
                 # Update path if changed
                 if vdata.get('path') != data['path']:
                     vdata['path'] = data['path']
+                # Preserve file_id if already exists
                 break
         
         if not found:
@@ -167,7 +170,9 @@ def get_video_files():
                 'name': vdata['name'],
                 'path': vdata['path'],
                 'size': vdata.get('size', get_file_size(vdata['path'])),
-                'upload_date': vdata.get('upload_date', 'Unknown')
+                'upload_date': vdata.get('upload_date', 'Unknown'),
+                'file_id': vdata.get('file_id'),
+                'file_unique_id': vdata.get('file_unique_id')
             })
         else:
             # Remove missing video from database
@@ -187,7 +192,9 @@ def get_video_by_id(video_id):
                 'name': vdata['name'],
                 'path': vdata['path'],
                 'size': vdata.get('size', get_file_size(vdata['path'])),
-                'upload_date': vdata.get('upload_date', 'Unknown')
+                'upload_date': vdata.get('upload_date', 'Unknown'),
+                'file_id': vdata.get('file_id'),
+                'file_unique_id': vdata.get('file_unique_id')
             }
     return None
 
@@ -789,7 +796,7 @@ async def admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "You can send multiple videos one by one.\n"
         "Supported formats: MP4, AVI, MOV, MKV, WEBM, etc.\n\n"
         "⚠️ *Important:*\n"
-        "• No file size limit (Telegram allows up to 2GB)\n"
+        "• No file size limit - Telegram handles large files\n"
         "• Videos will be saved to the 'videos' folder\n"
         "• Each video will get a permanent ID\n"
         "• Send one video at a time\n"
@@ -802,7 +809,7 @@ async def admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
 async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video upload from admin (supports bulk upload)"""
+    """Handle video upload from admin (supports bulk upload) - stores file_id"""
     user_id = update.effective_user.id
     
     # Check if admin is in upload mode
@@ -824,6 +831,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         video = update.message.video
         file_id = video.file_id
+        file_unique_id = video.file_unique_id
         file_name = video.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
         
         # Clean filename
@@ -845,12 +853,12 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Send download progress
         status_msg = await update.message.reply_text(f"📥 Downloading '{file_name}'... Please wait.")
         
-        # Download file
+        # Download file (optional, we keep local copy for admin management)
         await file.download_to_drive(file_path)
         
         file_size = get_file_size(file_path)
         
-        # Add to video database with permanent ID
+        # Add to video database with permanent ID and file_id
         new_id = str(len(video_database) + 1)
         video_database[new_id] = {
             'name': file_name,
@@ -858,7 +866,9 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             'size': file_size,
             'size_bytes': os.path.getsize(file_path),
             'upload_date': datetime.now().isoformat(),
-            'uploaded_by': user_id
+            'uploaded_by': user_id,
+            'file_id': file_id,  # Store file_id for sending without size limit
+            'file_unique_id': file_unique_id
         }
         save_video_database()
         
@@ -1146,7 +1156,8 @@ async def admin_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Show video details with ID and file size
         for video in videos[:20]:
-            message += f"`{video['id']:3d}`. {video['name']} ({video['size']})\n"
+            has_file_id = "✅" if video.get('file_id') else "❌"
+            message += f"`{video['id']:3d}`. {video['name']} ({video['size']}) [FileID: {has_file_id}]\n"
         
         if len(videos) > 20:
             message += f"\n... and {len(videos) - 20} more videos\n"
@@ -1324,11 +1335,8 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return to main menu - FIXED"""
+    """Return to main menu"""
     query = update.callback_query
-    
-    # Create a new update object with the message
-    # We need to call show_main_menu with the update
     await show_main_menu(update, context)
 
 async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
@@ -1553,7 +1561,7 @@ def main():
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# Callback handler - FIXED
+# Callback handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses"""
     query = update.callback_query
@@ -1562,14 +1570,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'get_video':
         await send_video(update, context)
     elif query.data == 'next_video':
-        # Send another video without returning to menu
         await send_video(update, context)
     elif query.data == 'my_stats':
         await show_user_stats(update, context)
     elif query.data == 'help_user' or query.data == 'help_key':
         await help_user(update, context)
     elif query.data == 'back_to_menu':
-        # This should work now
         await show_main_menu(update, context)
     elif query.data == 'admin_panel':
         await admin_panel(update, context)
@@ -1590,14 +1596,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'admin_refresh':
         await admin_refresh(update, context)
     elif query.data.startswith('confirm_remove_self_'):
-        # Handle self-removal confirmation
         admin_id = int(query.data.replace('confirm_remove_self_', ''))
         await confirm_remove_self(update, context, admin_id)
     elif query.data == 'cancel_remove_admin':
         await query.message.edit_text("✅ Admin removal cancelled.")
         await admin_panel(update, context)
     elif query.data.startswith('confirm_delete_video_'):
-        # Handle video deletion confirmation
         video_id = int(query.data.replace('confirm_delete_video_', ''))
         await confirm_delete_video(update, context, video_id)
     elif query.data == 'cancel_delete_video':
@@ -1633,7 +1637,6 @@ async def confirm_delete_video(update: Update, context: ContextTypes.DEFAULT_TYP
             del video_database[str(video_id)]
             save_video_database()
         
-        # Log the deletion
         logger.info(f"Video '{video['name']}' (ID: {video_id}) permanently deleted by admin {user_id}")
         
         await query.message.edit_text(
@@ -1673,21 +1676,17 @@ async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     user_id = query.from_user.id
     
-    # Verify it's the same user
     if user_id != admin_id:
         await query.answer("⛔ You can only remove yourself!")
         return
     
-    # Check if trying to remove self
     if len(ADMIN_IDS) <= 1:
         await query.answer("⚠️ Cannot remove yourself as you're the only admin!")
         return
     
-    # Remove from admin list
     ADMIN_IDS.remove(admin_id)
     save_admin_ids()
     
-    # Update user data
     user_id_str = str(admin_id)
     if user_id_str in user_data:
         user_data[user_id_str]['is_admin'] = False
@@ -1700,12 +1699,10 @@ async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode='Markdown'
     )
     
-    # Show main menu
     await show_main_menu(update, context)
 
 async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a random video to the user with Next Video button - FIXED"""
-    # Determine if it's a callback query or direct message
+    """Send a random video to the user using file_id (bypasses size limit)"""
     if update.callback_query:
         query = update.callback_query
         user_id = query.from_user.id
@@ -1714,10 +1711,9 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_callback = True
         message_obj = query.message
     else:
-        # Not used directly from command, but for completeness
         return
     
-    # Check authentication (admin auto-auth)
+    # Check authentication
     if is_admin(user_id):
         if user_id_str not in user_data:
             user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
@@ -1731,26 +1727,23 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ Please authenticate first using /key")
         return
     
-    # Get list of videos
     videos = get_video_files()
-    
     if not videos:
-        await query.answer("❌ No videos available in the folder!")
+        await query.answer("❌ No videos available!")
         return
     
-    # Select a random video
+    # Select random video
     selected_video = random.choice(videos)
     video_name = selected_video['name']
     video_size = selected_video['size']
     video_id = selected_video['id']
-    video_path = selected_video['path']
+    file_id = selected_video.get('file_id')
     
     try:
-        # Send "loading" message
         if is_callback:
             await query.answer("📤 Sending video...")
         
-        # Create inline buttons
+        # Prepare buttons
         keyboard = [
             [
                 InlineKeyboardButton("🎬 Next Video", callback_data='next_video'),
@@ -1759,10 +1752,10 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Send the video with proper handling
-        with open(video_path, 'rb') as video_file:
+        # Send using file_id if available (no size limit), else fallback to local file
+        if file_id:
             sent_message = await message_obj.reply_video(
-                video=video_file,
+                video=file_id,
                 caption=f"🎬 Here's your random video!\n\n"
                        f"⏰ This message will be deleted in 30 minutes.\n"
                        f"📹 Video: {video_name}\n"
@@ -1771,19 +1764,34 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"💡 The video file is stored permanently.\n"
                        f"Click 'Next Video' for another random video.",
                 reply_markup=reply_markup,
-                supports_streaming=True,
-                read_timeout=60,
-                write_timeout=60,
-                connect_timeout=60,
-                pool_timeout=60
+                supports_streaming=True
             )
+        else:
+            # Fallback to local file (may fail if >50MB)
+            with open(selected_video['path'], 'rb') as video_file:
+                sent_message = await message_obj.reply_video(
+                    video=video_file,
+                    caption=f"🎬 Here's your random video!\n\n"
+                           f"⏰ This message will be deleted in 30 minutes.\n"
+                           f"📹 Video: {video_name}\n"
+                           f"🆔 ID: {video_id} (permanent)\n"
+                           f"📦 Size: {video_size}\n\n"
+                           f"💡 The video file is stored permanently.\n"
+                           f"Click 'Next Video' for another random video.",
+                    reply_markup=reply_markup,
+                    supports_streaming=True,
+                    read_timeout=60,
+                    write_timeout=60,
+                    connect_timeout=60,
+                    pool_timeout=60
+                )
         
         # Update user stats
         user_data[user_id_str]['videos_watched'] = user_data[user_id_str].get('videos_watched', 0) + 1
         user_data[user_id_str]['last_video_time'] = datetime.now().isoformat()
         save_data()
         
-        # Schedule ONLY the message deletion from chat after 30 minutes
+        # Schedule message deletion after 30 minutes
         pending_deletions.append({
             'chat_id': chat_id,
             'message_id': sent_message.message_id,
@@ -1795,15 +1803,13 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if is_callback:
             await query.answer("✅ Video sent!")
-            # Don't show main menu automatically, user can click buttons
     
     except Exception as e:
         logger.error(f"Error sending video: {e}")
         if is_callback:
             await query.answer("❌ Error sending video. Please try again.")
-            # Try to send error message
             try:
-                await message_obj.reply_text(f"❌ Error sending video: {str(e)}")
+                await message_obj.reply_text(f"❌ Error: {str(e)}")
             except:
                 pass
 
@@ -1813,7 +1819,6 @@ async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user_id_str = str(user_id)
     
-    # Admin auto-auth check
     if is_admin(user_id) and user_id_str not in user_data:
         user_data[user_id_str] = {'authenticated': True, 'is_admin': True}
         save_data()
@@ -1827,7 +1832,6 @@ async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     joined_at = stats.get('joined_at', 'Unknown')
     is_admin_user = stats.get('is_admin', False) or is_admin(user_id)
     
-    # Format join date
     try:
         join_date = datetime.fromisoformat(joined_at).strftime('%Y-%m-%d %H:%M')
     except:
