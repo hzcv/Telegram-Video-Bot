@@ -4,6 +4,7 @@ import asyncio
 import logging
 import json
 import shutil
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,13 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot token - Replace with your actual bot token
-BOT_TOKEN = "8296217662:AAHjIHXtxkjYmDR-9vSPzznUNWjQxvKGgdw"
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 
 # The secret key for new users
-SECRET_KEY = "Loveyouzara"
+SECRET_KEY = "Amair"
 
 # Admin user IDs (Replace with actual admin Telegram user IDs)
-ADMIN_IDS = [8159360955, ]  # Add your Telegram user IDs here
+ADMIN_IDS = [123456789, 987654321]  # Add your Telegram user IDs here
 
 # Directory where videos are stored
 VIDEOS_DIR = "videos"
@@ -31,11 +32,13 @@ VIDEOS_DIR = "videos"
 # Data file for persistent storage
 DATA_FILE = "bot_data.json"
 ADMIN_FILE = "admin_ids.json"
+VIDEO_DB_FILE = "video_db.json"
 
 # Track user authentication status and video timers
 user_data = {}
-pending_deletions = []
+pending_deletions = []  # Track messages to delete from chat
 uploading_admins = {}  # Track admins who are uploading videos
+video_database = {}  # Store video metadata with permanent IDs
 
 # Ensure directories exist
 os.makedirs(VIDEOS_DIR, exist_ok=True)
@@ -66,30 +69,126 @@ def save_data():
     except Exception as e:
         logger.error(f"Error saving data: {e}")
 
-def get_video_files():
-    """Get list of video files from the videos directory with IDs"""
+def load_video_database():
+    """Load video database from JSON file"""
+    global video_database
+    if os.path.exists(VIDEO_DB_FILE):
+        try:
+            with open(VIDEO_DB_FILE, 'r') as f:
+                video_database = json.load(f)
+                logger.info(f"Loaded video database with {len(video_database)} videos")
+        except Exception as e:
+            logger.error(f"Error loading video database: {e}")
+            video_database = {}
+    else:
+        # Create new database with existing videos
+        rebuild_video_database()
+
+def save_video_database():
+    """Save video database to JSON file"""
+    try:
+        with open(VIDEO_DB_FILE, 'w') as f:
+            json.dump(video_database, f, indent=2)
+        logger.info(f"Video database saved with {len(video_database)} videos")
+    except Exception as e:
+        logger.error(f"Error saving video database: {e}")
+
+def rebuild_video_database():
+    """Rebuild video database from filesystem"""
+    global video_database
     video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp', '.m4v', '.mpg', '.mpeg'}
-    videos = []
     
+    # Find all video files
+    existing_videos = {}
     if os.path.exists(VIDEOS_DIR):
-        for idx, file in enumerate(os.listdir(VIDEOS_DIR), 1):
+        for file in os.listdir(VIDEOS_DIR):
             file_path = os.path.join(VIDEOS_DIR, file)
             if os.path.isfile(file_path) and Path(file).suffix.lower() in video_extensions:
-                videos.append({
-                    'id': idx,
+                # Generate unique ID based on file name and size
+                file_hash = hashlib.md5(f"{file}_{os.path.getsize(file_path)}".encode()).hexdigest()[:8]
+                existing_videos[file] = {
                     'name': file,
                     'path': file_path,
-                    'size': get_file_size(file_path)
-                })
+                    'size': get_file_size(file_path),
+                    'size_bytes': os.path.getsize(file_path),
+                    'hash': file_hash,
+                    'upload_date': datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
+                }
+    
+    # Merge with existing database
+    for filename, data in existing_videos.items():
+        # Check if video already exists in database
+        found = False
+        for vid, vdata in video_database.items():
+            if vdata.get('name') == filename:
+                found = True
+                # Update path if changed
+                if vdata.get('path') != data['path']:
+                    vdata['path'] = data['path']
+                break
+        
+        if not found:
+            # Assign new ID
+            new_id = str(len(video_database) + 1)
+            video_database[new_id] = data
+    
+    # Remove videos that no longer exist
+    to_remove = []
+    for vid, vdata in video_database.items():
+        if not os.path.exists(vdata.get('path', '')):
+            to_remove.append(vid)
+    
+    for vid in to_remove:
+        del video_database[vid]
+        logger.info(f"Removed missing video from database: {vid}")
+    
+    # Renumber IDs to be sequential
+    if video_database:
+        # Sort by ID
+        sorted_ids = sorted(video_database.keys(), key=lambda x: int(x))
+        new_db = {}
+        for new_id, old_id in enumerate(sorted_ids, 1):
+            new_db[str(new_id)] = video_database[old_id]
+        video_database = new_db
+    
+    save_video_database()
+    logger.info(f"Rebuilt video database with {len(video_database)} videos")
+
+def get_video_files():
+    """Get list of video files from database with permanent IDs"""
+    videos = []
+    # Sort by ID
+    for vid in sorted(video_database.keys(), key=lambda x: int(x)):
+        vdata = video_database[vid]
+        # Check if file still exists
+        if os.path.exists(vdata.get('path', '')):
+            videos.append({
+                'id': int(vid),
+                'name': vdata['name'],
+                'path': vdata['path'],
+                'size': vdata.get('size', get_file_size(vdata['path'])),
+                'upload_date': vdata.get('upload_date', 'Unknown')
+            })
+        else:
+            # Remove missing video from database
+            del video_database[vid]
+            save_video_database()
     
     return videos
 
 def get_video_by_id(video_id):
-    """Get video by its ID"""
-    videos = get_video_files()
-    for video in videos:
-        if video['id'] == video_id:
-            return video
+    """Get video by its permanent ID"""
+    video_id_str = str(video_id)
+    if video_id_str in video_database:
+        vdata = video_database[video_id_str]
+        if os.path.exists(vdata.get('path', '')):
+            return {
+                'id': int(video_id_str),
+                'name': vdata['name'],
+                'path': vdata['path'],
+                'size': vdata.get('size', get_file_size(vdata['path'])),
+                'upload_date': vdata.get('upload_date', 'Unknown')
+            }
     return None
 
 def is_admin(user_id):
@@ -140,8 +239,10 @@ def load_admin_ids():
     except Exception as e:
         logger.error(f"Error loading admin IDs: {e}")
 
-# Load admin IDs at startup
+# Load data at startup
+load_data()
 load_admin_ids()
+load_video_database()
 
 # ==================== USER COMMANDS ====================
 
@@ -336,7 +437,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📁 Available videos: {videos_count}\n"
         f"🎬 Videos watched: {user_data[user_id_str].get('videos_watched', 0)}\n\n"
         "Click the button below to receive a random video.\n"
-        "The video will be automatically deleted after 30 minutes."
+        "The video message will be automatically deleted after 30 minutes."
     )
     
     # Handle both callback queries and direct messages
@@ -575,7 +676,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     folder_size_str = get_file_size_from_bytes(folder_size)
     
     keyboard = [
-        [InlineKeyboardButton("📤 Upload Video", callback_data='admin_upload')],
+        [InlineKeyboardButton("📤 Upload Videos", callback_data='admin_upload')],
         [InlineKeyboardButton("📢 Broadcast Message", callback_data='admin_broadcast')],
         [InlineKeyboardButton("👥 User List", callback_data='admin_users')],
         [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
@@ -676,26 +777,32 @@ async def admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Store that admin is in upload mode
     uploading_admins[user_id] = True
+    uploading_admins[f"{user_id}_count"] = 0
+    uploading_admins[f"{user_id}_videos"] = []
     
     keyboard = [[InlineKeyboardButton("❌ Cancel Upload", callback_data='admin_panel')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.message.edit_text(
-        "📤 *Upload Video*\n\n"
-        "Please send the video file you want to upload.\n"
+        "📤 *Upload Videos*\n\n"
+        "Please send the video files you want to upload.\n"
+        "You can send multiple videos one by one.\n"
         "Supported formats: MP4, AVI, MOV, MKV, WEBM, etc.\n\n"
         "⚠️ *Important:*\n"
-        "• Maximum file size: 50MB (Telegram limit)\n"
-        "• The video will be saved to the 'videos' folder\n"
+        "• Maximum file size: 50MB per video (Telegram limit)\n"
+        "• Videos will be saved to the 'videos' folder\n"
+        "• Each video will get a permanent ID\n"
+        "• Send one video at a time\n"
+        "• Type /done when you're finished uploading\n"
         "• Type /cancel to cancel upload\n\n"
-        "📤 Send your video now:",
+        "📤 Send your first video now:",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
     await query.answer()
 
 async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video upload from admin"""
+    """Handle video upload from admin (supports bulk upload)"""
     user_id = update.effective_user.id
     
     # Check if admin is in upload mode
@@ -710,7 +817,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message.video:
         await update.message.reply_text(
             "❌ Please send a valid video file.\n"
-            "Send /cancel to cancel upload."
+            "Send /done when finished or /cancel to cancel."
         )
         return
     
@@ -721,6 +828,14 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Clean filename
         file_name = file_name.replace('/', '_').replace('\\', '_')
+        
+        # Check file size (Telegram limit is 50MB)
+        if video.file_size > 50 * 1024 * 1024:
+            await update.message.reply_text(
+                f"❌ Video '{file_name}' is too large ({get_file_size_from_bytes(video.file_size)}).\n"
+                "Maximum size is 50MB. Please compress the video and try again."
+            )
+            return
         
         # Get file
         file = await context.bot.get_file(file_id)
@@ -735,32 +850,49 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             file_name = f"{base}_{counter}{ext}"
             file_path = os.path.join(VIDEOS_DIR, file_name)
         
+        # Send download progress
+        status_msg = await update.message.reply_text(f"📥 Downloading '{file_name}'... Please wait.")
+        
         # Download file
-        await update.message.reply_text("📥 Downloading video... Please wait.")
         await file.download_to_drive(file_path)
         
         file_size = get_file_size(file_path)
         
-        # Get the new video ID
-        videos = get_video_files()
-        new_video = None
-        for v in videos:
-            if v['path'] == file_path:
-                new_video = v
-                break
+        # Add to video database with permanent ID
+        new_id = str(len(video_database) + 1)
+        video_database[new_id] = {
+            'name': file_name,
+            'path': file_path,
+            'size': file_size,
+            'size_bytes': os.path.getsize(file_path),
+            'upload_date': datetime.now().isoformat(),
+            'uploaded_by': user_id
+        }
+        save_video_database()
         
-        # Success message
-        await update.message.reply_text(
+        # Track uploaded videos for bulk upload
+        if f"{user_id}_videos" not in uploading_admins:
+            uploading_admins[f"{user_id}_videos"] = []
+        uploading_admins[f"{user_id}_videos"].append({
+            'id': int(new_id),
+            'name': file_name,
+            'size': file_size
+        })
+        
+        # Update count
+        uploading_admins[f"{user_id}_count"] = uploading_admins.get(f"{user_id}_count", 0) + 1
+        
+        await status_msg.edit_text(
             f"✅ *Video Uploaded Successfully!*\n\n"
+            f"🆔 *Permanent ID:* `{new_id}`\n"
             f"📹 Name: {file_name}\n"
-            f"🆔 ID: {new_video['id'] if new_video else 'N/A'}\n"
             f"📦 Size: {file_size}\n"
-            f"📁 Location: `{file_path}`\n\n"
-            f"Total videos: {len(videos)}",
+            f"📊 Uploaded: {uploading_admins[f'{user_id}_count']} video(s) so far\n\n"
+            f"Send another video, or type /done to finish.",
             parse_mode='Markdown'
         )
         
-        # Notify all admins
+        # Notify all admins about new video
         for admin_id in ADMIN_IDS:
             if admin_id != user_id:
                 try:
@@ -768,33 +900,64 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                         admin_id,
                         f"📹 *New Video Uploaded*\n\n"
                         f"Uploaded by: {update.effective_user.first_name}\n"
+                        f"ID: `{new_id}`\n"
                         f"File: {file_name}\n"
-                        f"ID: {new_video['id'] if new_video else 'N/A'}\n"
                         f"Size: {file_size}",
                         parse_mode='Markdown'
                     )
                 except:
                     pass
-        
-        # Exit upload mode
-        uploading_admins[user_id] = False
-        
-        # Show admin panel again with inline keyboard
-        keyboard = [
-            [InlineKeyboardButton("⚙️ Back to Admin Panel", callback_data='admin_panel')],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "What would you like to do next?",
-            reply_markup=reply_markup
-        )
-    
+                
     except Exception as e:
         logger.error(f"Error uploading video: {e}")
         await update.message.reply_text(f"❌ Error uploading video: {str(e)}")
-        uploading_admins[user_id] = False
+
+async def done_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finish bulk upload process"""
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Unauthorized!")
+        return
+    
+    if user_id not in uploading_admins or not uploading_admins.get(user_id, False):
+        await update.message.reply_text("❌ You're not in upload mode.")
+        return
+    
+    count = uploading_admins.get(f"{user_id}_count", 0)
+    videos = uploading_admins.get(f"{user_id}_videos", [])
+    
+    if count == 0:
+        await update.message.reply_text(
+            "❌ No videos were uploaded.\n"
+            "Send /cancel to exit upload mode."
+        )
+        return
+    
+    # Create summary
+    message = f"✅ *Bulk Upload Complete!*\n\n"
+    message += f"📊 Total videos uploaded: {count}\n\n"
+    message += "📹 *Uploaded Videos:*\n"
+    for video in videos[:20]:
+        message += f"• ID: `{video['id']}` - {video['name']} ({video['size']})\n"
+    
+    if len(videos) > 20:
+        message += f"\n... and {len(videos) - 20} more videos\n"
+    
+    message += f"\n💡 Total videos available: {len(get_video_files())}"
+    
+    # Clear upload mode
+    uploading_admins[user_id] = False
+    uploading_admins[f"{user_id}_count"] = 0
+    uploading_admins[f"{user_id}_videos"] = []
+    
+    keyboard = [
+        [InlineKeyboardButton("⚙️ Back to Admin Panel", callback_data='admin_panel')],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle broadcast functionality"""
@@ -987,7 +1150,7 @@ async def admin_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = "🎬 *Video Management*\n\n"
     if videos:
         message += f"📁 Total videos: {len(videos)}\n\n"
-        message += "📹 *Video List with IDs:*\n"
+        message += "📹 *Video List with Permanent IDs:*\n"
         
         # Show video details with ID and file size
         for video in videos[:20]:
@@ -996,15 +1159,15 @@ async def admin_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(videos) > 20:
             message += f"\n... and {len(videos) - 20} more videos\n"
         
-        message += "\n💡 To delete a video, use:\n"
+        message += "\n💡 To delete a video from the folder (permanent), use:\n"
         message += "`/rmvideo VIDEO_ID`\n"
         message += "Example: `/rmvideo 5`\n\n"
-        message += "📤 To add videos, use the 'Upload Video' button below."
+        message += "📤 To add videos, use the 'Upload Videos' button below."
     else:
         message += "❌ No videos found in the folder."
     
     keyboard = [
-        [InlineKeyboardButton("📤 Upload Video", callback_data='admin_upload')],
+        [InlineKeyboardButton("📤 Upload Videos", callback_data='admin_upload')],
         [InlineKeyboardButton("🔄 Refresh List", callback_data='admin_videos')],
         [InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]
     ]
@@ -1056,6 +1219,9 @@ async def admin_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔ Unauthorized!")
         return
     
+    # Rebuild database to sync with filesystem
+    rebuild_video_database()
+    
     await query.answer("🔄 Refreshing...")
     await admin_panel(update, context)
 
@@ -1089,7 +1255,7 @@ async def handle_admin_commands(update: Update, context: ContextTypes.DEFAULT_TY
         authenticated_users = sum(1 for u in user_data.values() if u.get('authenticated', False))
         
         keyboard = [
-            [InlineKeyboardButton("📤 Upload Video", callback_data='admin_upload')],
+            [InlineKeyboardButton("📤 Upload Videos", callback_data='admin_upload')],
             [InlineKeyboardButton("📢 Broadcast", callback_data='admin_broadcast')],
             [InlineKeyboardButton("👥 Users", callback_data='admin_users')],
             [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
@@ -1122,21 +1288,24 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = (
             "❓ *Admin Help Center*\n\n"
             "🤖 *Admin Features:*\n"
-            "• Upload videos via chat\n"
+            "• Upload multiple videos (bulk upload)\n"
+            "• Forward videos from other chats\n"
+            "• Permanent video IDs (never change)\n"
             "• Broadcast messages to all users\n"
             "• View user statistics\n"
             "• Manage videos\n"
             "• View all users\n"
             "• Give/Remove admin access\n"
-            "• Delete videos by ID\n\n"
+            "• Delete videos from folder\n\n"
             "📌 *Admin Commands:*\n"
             "/start - Start the bot\n"
             "/admin - Admin panel\n"
             "/giveadmin USER_ID - Give admin access\n"
             "/rmadmin USER_ID - Remove admin access\n"
             "/listadmins - List all admins\n"
-            "/rmvideo VIDEO_ID - Delete a video\n"
+            "/rmvideo VIDEO_ID - Delete video from folder\n"
             "/listvideos - List all videos with IDs\n"
+            "/done - Finish bulk upload\n"
             "/cancel - Cancel current operation\n\n"
             "💡 You have automatic access - no key needed!"
         )
@@ -1147,7 +1316,7 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Use /start to begin\n"
             "2. Enter the key using /key KEY\n"
             "3. Click 'Get Random Video' to watch\n"
-            "4. Videos auto-delete after 30 minutes\n\n"
+            "4. Video messages auto-delete after 30 minutes\n\n"
             "📌 *Commands:*\n"
             "/start - Start the bot\n"
             "/key - Enter your key\n"
@@ -1171,7 +1340,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
 async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
-    """Background task to delete expired videos"""
+    """Background task to delete expired video messages from chat"""
     now = datetime.now()
     to_delete = []
     
@@ -1185,10 +1354,10 @@ async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=item['chat_id'],
                 message_id=item['message_id']
             )
-            logger.info(f"Deleted video '{item.get('video_name', 'unknown')}' for user {item['user_id']}")
+            logger.info(f"Deleted video message '{item.get('video_name', 'unknown')}' for user {item['user_id']}")
             pending_deletions.remove(item)
         except Exception as e:
-            logger.error(f"Error deleting video: {e}")
+            logger.error(f"Error deleting video message: {e}")
             pending_deletions.remove(item)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1211,12 +1380,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await remove_video(update, context)
     elif text and text.startswith('/listvideos'):
         await list_videos(update, context)
+    elif text and text.startswith('/done'):
+        await done_upload(update, context)
     elif text and text.startswith('/cancel'):
         if context.user_data.get('broadcast_mode', False):
             context.user_data['broadcast_mode'] = False
             await update.message.reply_text("✅ Broadcast cancelled.")
         elif user_id in uploading_admins and uploading_admins.get(user_id, False):
             uploading_admins[user_id] = False
+            uploading_admins[f"{user_id}_count"] = 0
+            uploading_admins[f"{user_id}_videos"] = []
             await update.message.reply_text("✅ Upload cancelled.")
         else:
             await update.message.reply_text("Nothing to cancel.")
@@ -1224,7 +1397,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Handle broadcast message
         await handle_broadcast(update, context)
     elif user_id in uploading_admins and uploading_admins.get(user_id, False):
-        # Handle video upload
+        # Handle video upload (including forwarded videos)
         await handle_video_upload(update, context)
     else:
         # Unknown command
@@ -1234,7 +1407,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def remove_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a video by its ID"""
+    """Remove a video from the folder (permanent deletion)"""
     user_id = update.effective_user.id
     
     # Check if the command user is admin
@@ -1284,42 +1457,26 @@ async def remove_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Delete the video file
-    try:
-        os.remove(video['path'])
-        
-        # Log the deletion
-        logger.info(f"Video '{video['name']}' (ID: {video_id}) deleted by admin {user_id}")
-        
-        await update.message.reply_text(
-            f"✅ *Video Deleted Successfully!*\n\n"
-            f"📹 Name: {video['name']}\n"
-            f"🆔 ID: {video_id}\n"
-            f"📦 Size: {video['size']}\n\n"
-            f"Remaining videos: {len(get_video_files())}",
-            parse_mode='Markdown'
-        )
-        
-        # Notify other admins
-        for admin_id in ADMIN_IDS:
-            if admin_id != user_id:
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        f"🗑️ *Video Deleted*\n\n"
-                        f"Deleted by: {update.effective_user.first_name}\n"
-                        f"Video: {video['name']}\n"
-                        f"ID: {video_id}",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-                
-    except Exception as e:
-        logger.error(f"Error deleting video: {e}")
-        await update.message.reply_text(
-            f"❌ Error deleting video: {str(e)}"
-        )
+    # Ask for confirmation before permanent deletion
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Delete Permanently", callback_data=f'confirm_delete_video_{video_id}'),
+            InlineKeyboardButton("❌ No, Cancel", callback_data='cancel_delete_video')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"⚠️ *WARNING: Permanent Deletion*\n\n"
+        f"You are about to permanently delete this video from the folder:\n"
+        f"📹 Name: {video['name']}\n"
+        f"🆔 ID: {video_id}\n"
+        f"📦 Size: {video['size']}\n\n"
+        f"This action CANNOT be undone!\n\n"
+        f"Are you sure you want to proceed?",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
 
 async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all videos with their IDs"""
@@ -1336,7 +1493,7 @@ async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No videos found in the folder.")
         return
     
-    message = "📹 *Complete Video List:*\n\n"
+    message = "📹 *Complete Video List (Permanent IDs):*\n\n"
     
     # Show all videos with IDs
     for video in videos:
@@ -1352,9 +1509,10 @@ async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Show usage info
     await update.message.reply_text(
-        "💡 To delete a video, use:\n"
+        "💡 To permanently delete a video from the folder, use:\n"
         "`/rmvideo VIDEO_ID`\n\n"
-        "Example: `/rmvideo 5`",
+        "Example: `/rmvideo 5`\n\n"
+        "⚠️ This will delete the video file permanently!",
         parse_mode='Markdown'
     )
 
@@ -1365,6 +1523,7 @@ def main():
     # Load data
     load_data()
     load_admin_ids()
+    load_video_database()
     
     # Create application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1378,6 +1537,7 @@ def main():
     application.add_handler(CommandHandler("listadmins", list_admins))
     application.add_handler(CommandHandler("rmvideo", remove_video))
     application.add_handler(CommandHandler("listvideos", list_videos))
+    application.add_handler(CommandHandler("done", done_upload))
     application.add_handler(CommandHandler("cancel", handle_message))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -1440,8 +1600,77 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'cancel_remove_admin':
         await query.message.edit_text("✅ Admin removal cancelled.")
         await admin_panel(update, context)
+    elif query.data.startswith('confirm_delete_video_'):
+        # Handle video deletion confirmation
+        video_id = int(query.data.replace('confirm_delete_video_', ''))
+        await confirm_delete_video(update, context, video_id)
+    elif query.data == 'cancel_delete_video':
+        await query.message.edit_text("✅ Video deletion cancelled.")
+        await admin_panel(update, context)
     else:
         await query.message.reply_text("Unknown action!")
+
+async def confirm_delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE, video_id):
+    """Confirm permanent video deletion from folder"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if not is_admin(user_id):
+        await query.answer("⛔ Unauthorized!")
+        return
+    
+    # Find the video
+    video = get_video_by_id(video_id)
+    if not video:
+        await query.message.edit_text(
+            f"❌ Video with ID `{video_id}` not found.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Delete the video file
+    try:
+        os.remove(video['path'])
+        
+        # Remove from database
+        if str(video_id) in video_database:
+            del video_database[str(video_id)]
+            save_video_database()
+        
+        # Log the deletion
+        logger.info(f"Video '{video['name']}' (ID: {video_id}) permanently deleted by admin {user_id}")
+        
+        await query.message.edit_text(
+            f"✅ *Video Permanently Deleted!*\n\n"
+            f"📹 Name: {video['name']}\n"
+            f"🆔 ID: {video_id}\n"
+            f"📦 Size: {video['size']}\n\n"
+            f"Remaining videos: {len(get_video_files())}\n\n"
+            f"⚠️ This video has been removed from the folder.",
+            parse_mode='Markdown'
+        )
+        
+        # Notify other admins
+        for admin_id in ADMIN_IDS:
+            if admin_id != user_id:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"🗑️ *Video Permanently Deleted*\n\n"
+                        f"Deleted by: {update.effective_user.first_name}\n"
+                        f"Video: {video['name']}\n"
+                        f"ID: {video_id}\n"
+                        f"⚠️ This video has been removed from the folder.",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                
+    except Exception as e:
+        logger.error(f"Error deleting video: {e}")
+        await query.message.edit_text(
+            f"❌ Error deleting video: {str(e)}"
+        )
 
 async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_id):
     """Confirm self-removal of admin"""
@@ -1520,10 +1749,11 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = await query.message.reply_video(
                 video=video_file,
                 caption=f"🎬 Here's your random video!\n\n"
-                       f"⏰ It will be deleted in 30 minutes.\n"
+                       f"⏰ This message will be deleted in 30 minutes.\n"
                        f"📹 Video: {video_name}\n"
-                       f"🆔 ID: {video_id}\n"
-                       f"📦 Size: {video_size}",
+                       f"🆔 ID: {video_id} (permanent)\n"
+                       f"📦 Size: {video_size}\n\n"
+                       f"💡 The video file is stored permanently in the bot's library.",
                 supports_streaming=True
             )
         
@@ -1532,11 +1762,11 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id_str]['last_video_time'] = datetime.now().isoformat()
         save_data()
         
-        # Schedule video deletion after 30 minutes
+        # Schedule ONLY the message deletion from chat after 30 minutes
         chat_id = query.message.chat_id
         message_id = message.message_id
         
-        # Store for deletion
+        # Store for deletion (only message, not video file)
         pending_deletions.append({
             'chat_id': chat_id,
             'message_id': message_id,
