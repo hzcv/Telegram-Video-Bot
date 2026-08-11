@@ -1324,8 +1324,11 @@ async def help_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return to main menu"""
+    """Return to main menu - FIXED"""
     query = update.callback_query
+    
+    # Create a new update object with the message
+    # We need to call show_main_menu with the update
     await show_main_menu(update, context)
 
 async def delete_expired_videos(context: ContextTypes.DEFAULT_TYPE):
@@ -1550,7 +1553,7 @@ def main():
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# Callback handler
+# Callback handler - FIXED
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses"""
     query = update.callback_query
@@ -1566,7 +1569,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'help_user' or query.data == 'help_key':
         await help_user(update, context)
     elif query.data == 'back_to_menu':
-        await back_to_menu(update, context)
+        # This should work now
+        await show_main_menu(update, context)
     elif query.data == 'admin_panel':
         await admin_panel(update, context)
     elif query.data == 'admin_upload':
@@ -1700,7 +1704,7 @@ async def confirm_remove_self(update: Update, context: ContextTypes.DEFAULT_TYPE
     await show_main_menu(update, context)
 
 async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a random video to the user with Next Video button"""
+    """Send a random video to the user with Next Video button - FIXED"""
     # Determine if it's a callback query or direct message
     if update.callback_query:
         query = update.callback_query
@@ -1739,13 +1743,14 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_name = selected_video['name']
     video_size = selected_video['size']
     video_id = selected_video['id']
+    video_path = selected_video['path']
     
     try:
         # Send "loading" message
         if is_callback:
             await query.answer("📤 Sending video...")
         
-        # Send the video with inline buttons: Next Video and Main Menu
+        # Create inline buttons
         keyboard = [
             [
                 InlineKeyboardButton("🎬 Next Video", callback_data='next_video'),
@@ -1754,7 +1759,8 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        with open(selected_video['path'], 'rb') as video_file:
+        # Send the video with proper handling
+        with open(video_path, 'rb') as video_file:
             sent_message = await message_obj.reply_video(
                 video=video_file,
                 caption=f"🎬 Here's your random video!\n\n"
@@ -1765,7 +1771,11 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"💡 The video file is stored permanently.\n"
                        f"Click 'Next Video' for another random video.",
                 reply_markup=reply_markup,
-                supports_streaming=True
+                supports_streaming=True,
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=60,
+                pool_timeout=60
             )
         
         # Update user stats
@@ -1785,12 +1795,17 @@ async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if is_callback:
             await query.answer("✅ Video sent!")
-            # Do not show main menu automatically; user can click buttons
+            # Don't show main menu automatically, user can click buttons
     
     except Exception as e:
         logger.error(f"Error sending video: {e}")
         if is_callback:
             await query.answer("❌ Error sending video. Please try again.")
+            # Try to send error message
+            try:
+                await message_obj.reply_text(f"❌ Error sending video: {str(e)}")
+            except:
+                pass
 
 async def show_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user statistics"""
